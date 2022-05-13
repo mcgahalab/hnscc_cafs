@@ -7,6 +7,7 @@ library(tidyr)
 library(tibble)
 library(ggplot2)
 library(cowplot)
+library(reshape2)
 # Enrichment
 library(org.Hs.eg.db)
 library(clusterProfiler)
@@ -39,6 +40,19 @@ sig_cols <- setNames(rep("black",3), names(sig_fills))
 sig_sizes <- setNames(c(1,1,1.5), names(sig_fills))
 grp_cols <- c('DMSO'='#2b8cbe', 'A366'='#a50f15', 'OICR'='#fb6a4a') #blue, red, red
 
+# gsea params:
+geneset_oi <- NULL
+# geneset_oi <- c('HALLMARK_G2M_CHECKPOINT',
+#                 'HALLMARK_E2F_TARGETS',
+#                 'HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION',
+#                 'REACTOME_CELL_CYCLE_MITOTIC',
+#                 'REACTOME_INTEGRIN_CELL_SURFACE_INTERACTIONS',
+#                 'GOBP_MITOTIC_SISTER_CHROMATID_SEGREGATION', 
+#                 'GOBP_DNA_REPLICATION',
+#                 'GOCC_CHROMOSOME_CENTROMERIC_REGION',
+#                 'GOMF_EXTRACELLULAR_MATRIX_STRUCTURAL_CONSTITUENT', 
+#                 'GOMF_EXTRACELLULAR_MATRIX_STRUCTURAL_CONSTITUENT_CONFERRING_TENSILE_STRENGTH',
+#                 'GOMF_CHROMATIN_BINDING')
 # Create symbol<->entrezID mapping
 genome_gse <- org.Hs.eg.db
 txby <- keys(genome_gse, 'SYMBOL')
@@ -252,7 +266,7 @@ gg_gseas <- lapply(names(gseas[[1]]), function(geneset){
   # setup
   gsea_inh1 <- gseas$A366[[geneset]]
   gsea_inh2 <- gseas$OICR[[geneset]]
-  col_idx <- c(1,5,7,10)
+  col_idx <- c(1,5,7,10,11)
   
   # merge gsea dataframes
   gsea_merge <- full_join(as.data.frame(gsea_inh1)[,col_idx],
@@ -298,7 +312,74 @@ saveRDS(gsea_l, file=deseq_gsea_f)
 
 ######################################################
 #### 5.b) Barplot of select significant gene-sets ####
+if(!exists("gsea_l")) gsea_l <- readRDS(deseq_gsea_f)
+gsea_merge <- do.call(rbind, gsea_l$gsea_by_geneset[c(1:5)]) %>%
+  as.data.frame 
+geneset_ois <- sapply(gsea_l$sig_genesets, function(geneset_i) geneset_i$Intersect)
 
+# label the GSEA results by their geneset and msigdb level
+gsea_merge <- cbind(gsea_merge,
+                    strsplit(rownames(gsea_merge), split="\\.") %>%
+                      do.call(rbind,.) %>% 
+                      as.data.frame %>%
+                      rename_with(., ~ c("C1", "C2", "geneset")) %>%
+                      mutate(C=paste0(C1, ".", C2)))
+
+# validation check
+if(is.null(geneset_oi)) warning(cat(paste0(
+  "> No genesets specified, defaulting to top5 per geneset, 
+  please list from the following list: \n",
+  paste(paste0("\t- ", unlist(geneset_ois)), collapse="\n"))))
+if(is.null(geneset_oi)) {
+  geneset_oi <- gsea_merge %>% 
+    mutate(pcum=abs(1-(p.adjust.A366 + p.adjust.OICR))) %>%
+    filter((p.adjust.A366 < deg_q_thresh) | (p.adjust.OICR < deg_q_thresh)) %>%
+    group_by(C) %>%
+    top_n(., 5, pcum) %>% 
+    select(geneset)
+  geneset_oi <- geneset_oi$geneset
+}
+  
+nes_cols <- grep("NES", colnames(gsea_merge), value=T) %>%
+  setNames(., gsub("^.*\\.", "", .)) 
+gsea_melt <- gsea_merge %>% 
+  filter(geneset %in% geneset_oi) %>%
+  select(nes_cols, C, geneset, sig) %>%
+  mutate(geneset = gsub("_", " ", geneset) %>%
+           gsub("HALLMARK |GOBP |REACTOME |GOCC |GOMF ", "", .) %>%
+           str_to_sentence) %>%
+  melt %>% 
+  rename_with(., ~ c("msig", "Geneset", "Overlap", "Inhibitor", "NES")) 
+
+gg_bar <- ggplot(gsea_melt, aes(y=Geneset, x=NES, color=Overlap, 
+                                fill=Inhibitor, group=Inhibitor)) +
+  geom_hline(aes(yintercept=Geneset), linetype='dashed', color='grey') + 
+  geom_bar(stat='identity', position='dodge', size=0.7, width=0.8) +
+  scale_fill_manual(values=c('A366'='grey1',
+                             'OICR'='grey50')) +
+  scale_color_manual(values=c(sig_fills,
+                             'nonSig'='grey')) +
+  facet_grid(msig ~ ., scales='free', space='free',switch = "y") +
+  theme_classic() +
+  xlim(-3,3) + ylim(-3,3) +
+  geom_vline(xintercept=0, color='black') +
+  theme(axis.text.y = element_text(size=6, hjust=0),
+        strip.text.y.left = element_text(angle=90, size=8),
+        legend.position = 'right',
+        legend.margin =margin(0,0,0,0)) +
+  guides(fill=guide_legend(title="q < 0.05")) +
+  ylab("") + xlab("NES") +
+  scale_y_discrete(labels =  scales::wrap_format(40))
+
+pdf(file=file.path("results", "gsea", "gsea_bar.pdf"), height = 6, width = 6)
+gg_bar
+dev.off()
+  
+##########################################################
+#### 5.c) DEG Heatmap of significant genes & genesets ####
+if(!exists("resl")) resl <- readRDS(deseq_res_f)
+if(!exists("gsea_l")) gsea_l <- readRDS(deseq_gsea_f)
+if(!exists("vsd")) vsd <- readRDS(file=deseq_vst_f)
 
 ##############
 #### TEST ####
