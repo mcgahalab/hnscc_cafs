@@ -1,19 +1,105 @@
+# DEG analysis
 library(DESeq2)
+library(pheatmap)
+# General
 library(dplyr)
 library(tidyr)
 library(tibble)
+library(ggplot2)
+library(cowplot)
+# Enrichment
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(enrichplot)
+library(msigdbr)
+# Custom
+source("~/git/mini_projects/mini_functions/iterateMsigdb.R")
 
 wideScreen()
 
 pdir <- '/cluster/projects/mcgahalab/data/mcgahalab/mcguigan_and_nila_ram/analysis'
+setwd(pdir)
+
+# Directories
 rdsdir <- file.path("data", "deseq2_rds", "rds")
 
-
+# Intermediate/data files
 cnts_f <- file.path("results", "data", "counts.csv")
 meta_f <- file.path("results", "data", "meta.csv")
 deseq_f <- file.path("results", "data", "deseq.rds")
 deseq_vst_f <- file.path("results", "data", "deseq_vst.rds")
+deseq_res_f <- file.path("results", "data", "deseq_res.rds")
+deseq_gsea_f <- file.path("results", "data", "deseq_gsea.rds")
+deg_q_thresh <- 0.05
 max_pc <- 5
+
+# plotting params
+sig_fills <- c('A366_only'='#2b8cbe', 'OICR_only'='#e34a33', 'Intersect'='#aea40c') 
+sig_cols <- setNames(rep("black",3), names(sig_fills))
+sig_sizes <- setNames(c(1,1,1.5), names(sig_fills))
+grp_cols <- c('DMSO'='#2b8cbe', 'A366'='#a50f15', 'OICR'='#fb6a4a') #blue, red, red
+
+# Create symbol<->entrezID mapping
+genome_gse <- org.Hs.eg.db
+txby <- keys(genome_gse, 'SYMBOL')
+sym2entrez_ids <- mapIds(genome_gse, keys=txby, column='ENTREZID',
+                         keytype='SYMBOL', multiVals="first")
+entrez2sym_ids <- setNames(names(sym2entrez_ids), sym2entrez_ids)
+
+###################
+#### Functions ####
+#
+venn <- function(df, pcols, qthresh){
+  sig <- apply(df[,pcols], 2, function(i){names(which(i<qthresh))})
+  all_sig <- unlist(sig) %>% unique()
+  split_sig <- list("A366_only"=setdiff(sig[[1]], sig[[2]]),
+                    "Intersect"=intersect(sig[[1]], sig[[2]]),
+                    "OICR_only"=setdiff(sig[[2]], sig[[1]]))
+  
+  df$sig <- 'nonSig'
+  for(split_id in names(split_sig)){
+    df[split_sig[[split_id]],]$sig <- split_id
+  }
+  return(list("res"=df, "sig"=split_sig))
+}
+
+formatStackedOverlap <- function(split_sig){
+  sapply(split_sig, length) %>% 
+    as.data.frame %>% 
+    rename_with(., ~ "Count") %>%
+    rownames_to_column(., "sig") %>%
+    mutate(grp='CAF')
+}
+
+plotStackedOverlap <- function(overlap_cnt){
+  ggplot(overlap_cnt, aes(x=Count, y=grp, fill=sig)) +
+    geom_bar(stat='identity', position='stack', alpha=0.75) +
+    scale_fill_manual(values=sig_fills) +
+    theme_classic() +
+    theme(axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank(), 
+          legend.position = 'none') 
+}
+
+scatterplotIt <- function(df, xval, yval, sig_cols=NULL,
+                          sig_fills=NULL, sig_sizes=NULL){
+  ggplot(df, aes_string(x=xval, y=yval, fill='sig', color='sig')) +
+    geom_point(pch=21, alpha=0.75) +
+    scale_color_manual(values=c(sig_cols,
+                                'nonSig'='grey')) +
+    scale_fill_manual(values=c(sig_fills,
+                               'nonSig'='grey')) +
+    scale_size_manual(values=c(sig_sizes,
+                               'nonSig'=0.5)) +
+    theme_classic() +
+    xlim(-2.5,6) + ylim(-2.5,6) +
+    theme(legend.position = 'right',
+          legend.margin =margin(0,0,0,0)) +
+    guides(fill=guide_legend(title="q < 0.05"),
+           color=guide_legend(title="q < 0.05"))
+}
 ##################################################################
 #### 1. Extract the Counts-matrix and the Metadata for DESeq2 ####
 if(!file.exists(cnts_f)){
@@ -31,6 +117,8 @@ if(!file.exists(cnts_f)){
   dup_idx <- gsub("(_[0-9]).*", "\\1", rownames(meta)) %>%
     duplicated
   meta <- meta[!dup_idx,,drop=F]
+  meta$sampletype <- gsub("_[0-9]*", "", rownames(meta))
+  
   
   write.table(cnt, file=cnts_f, sep=",", 
               quote=F, row.names = T, col.names = T)
@@ -52,8 +140,8 @@ if(!file.exists(deseq_f)){
   keep <- rowSums(assay(dds)) >= min_read_count
   dds <- dds[keep,]
   
-  # Set 'Control' as the base-level that Inhibitor1/2 will be compared against
-  dds$sampletype <- relevel(dds$sampletype, ref = "Control")
+  # Set 'DMSO' as the base-level that Inhibitor1/2 will be compared against
+  dds$sampletype <- relevel(dds$sampletype, ref = "DMSO")
   dds <- DESeq(dds)
   
   saveRDS(dds, file=deseq_f)
@@ -72,8 +160,7 @@ percent_var <- round(pca$sdev^2/sum(pca$sdev^2),2) %>%
 
 pca_x <- as.data.frame(cbind(pca$x[,paste0("PC", c(1:max_pc))],
                              "condition"=as.character(vsd$sampletype))) %>%
-  rownames_to_column(., 'Name') %>%
-  mutate(Sample=gsub("_.*", "", Name))
+  rownames_to_column(., 'Name')
 for(id in paste0("PC", c(1:max_pc))){
   pca_x[,id] <- as.numeric(as.character(pca_x[,id]))
 }
@@ -87,16 +174,137 @@ ggps <- lapply(pcs_l, function(pc){
     xlab(paste0(pc[1], " (", percent_var[pc[1]], ")")) +
     ylab(paste0(pc[2], " (", percent_var[pc[2]], ")")) +
     theme_classic() +
-    scale_color_manual(values=c(`Control`='#fc8d59', 
-                                `Inhibitor1`='#43a2ca', `Inhibitor2`='#253494')) +
+    scale_color_manual(values=grp_cols) +
     geom_text_repel(aes(label=Name), size=3, max.overlaps=12,max.iter=1000000)  
 })
 pdf(file.path("results", "pca", "pca.pdf"), height = 4, width = 5)
 ggps
 dev.off()
 
-#####################
-#### 3. Plot PCA ####
+saveRDS(vsd, file=deseq_vst_f)
+
+######################################
+#### 4. Generate DEGs and compare ####
+if(!exists("dds")) dds <- readRDS(file=deseq_f)
+if(!exists("vsd")) vsd <- readRDS(file=deseq_vst_f)
+
+# Calculate differential genes
+reslfc_inh1 <- lfcShrink(dds, coef=resultsNames(dds)[2], type="apeglm")
+reslfc_inh2 <- lfcShrink(dds, coef=resultsNames(dds)[3], type="apeglm")
+resl <- list("A366"=reslfc_inh1,
+             "OICR"=reslfc_inh2)
+
+# Merge differential genes into one dataframe
+suffix <- sapply(strsplit(resultsNames(dds)[-1], split="_"), function(i) i[2]) %>%
+  paste0(".", .)
+.dfGene <- function(x) x %>% as.data.frame() %>% rownames_to_column(., "gene")
+res <- full_join(.dfGene(reslfc_inh1), .dfGene(reslfc_inh2),
+                 by='gene', suffix=suffix) %>% 
+  column_to_rownames(., "gene")
+
+# Venn the p-values, assign differential flag to the LFCresults
+padj_col <- grep("padj", colnames(res), value=T)
+res_tmp <- venn(df = res, pcols = padj_col, qthresh = deg_q_thresh)
+res <- res_tmp$res
+split_sig <- res_tmp$sig
+
+# Setup for plotting
+lfc_cols <- grep("log2Fold", colnames(res), value=T) %>%
+  setNames(., gsub(".*\\.", "", .))
+
+# stacked barplot in venn-diagram style showing comparison of significant genes
+overlap_cnt <- formatStackedOverlap(split_sig)
+gg_vennbar <- plotStackedOverlap(overlap_cnt)
+
+# scatterplot showing comparison of LFC between significant genes
+gg_vennpnt <- scatterplotIt(res, lfc_cols[1], lfc_cols[2], 
+                            sig_cols, sig_fills, sig_sizes) +
+  xlab(paste0("Log2 fold-change (", names(lfc_cols)[1], ")")) + 
+  ylab(paste0("Log2 fold-change (", names(lfc_cols)[2], ")"))
+
+pdf(file.path("results", "deg", "lfc_venn.pdf"), height = 6, width = 6)
+plot_grid(gg_vennbar, gg_vennpnt, ncol=1, align='v', axis='lr', rel_heights=c(1,7))
+dev.off()
+
+resl <- c(resl, list("res"=res,
+                     "all_sig"=all_sig_genes,
+                     "split_sig"=split_sig))
+saveRDS(resl, file=deseq_res_f)
+
+################################################
+#### 5.a) Generate GSEA and compare between ####
+if(!exists("resl")) resl <- readRDS(deseq_res_f)
+
+# Estimate the geneset enrichment per inhibitor
+lfc_col <- 'log2FoldChange'
+lfcs <- list("A366"=resl$res[,paste0(lfc_col, ".", "A366"), drop=F],
+             "OICR"=resl$res[,paste0(lfc_col, ".", "OICR"), drop=F])
+gseas <- lapply(lfcs, function(lfc_i){
+  lfc_v <- setNames(lfc_i[,1],
+                    sym2entrez_ids[rownames(lfc_i)])
+  
+  unlist(iterateMsigdb(species='Homo sapiens', fun=gseaFun, lfc_v=lfc_v),
+         recursive=F)
+})
+
+# Merge GSEA dataframes between inhibitors by geneset, count overlap, and plot
+gg_gseas <- lapply(names(gseas[[1]]), function(geneset){
+  # setup
+  gsea_inh1 <- gseas$A366[[geneset]]
+  gsea_inh2 <- gseas$OICR[[geneset]]
+  col_idx <- c(1,5,7,10)
+  
+  # merge gsea dataframes
+  gsea_merge <- full_join(as.data.frame(gsea_inh1)[,col_idx],
+                          as.data.frame(gsea_inh2)[,col_idx],
+                          by='ID', suffix=c('.A366', '.OICR')) %>%
+    column_to_rownames(., "ID")
+  
+  qcols <- grep("p.adjust", colnames(gsea_merge), value=T)
+  gsea_tmp <- venn(gsea_merge, qcols, deg_q_thresh)
+  gsea_merge <- gsea_tmp$res
+  split_sig <- gsea_tmp$sig
+  
+  # stacked barplot in venn-diagram style showing comparison of significant genesets
+  overlap_cnt <- formatStackedOverlap(split_sig)
+  gg_vennbar <- plotStackedOverlap(overlap_cnt) + 
+    ggtitle(geneset)
+
+  # scatterplot showing comparison of NES between significant genesets
+  nes_cols <- grep("NES", colnames(gsea_merge), value=T) %>%
+    setNames(., gsub("^.*\\.", "",.))
+  gg_vennpnt <- scatterplotIt(gsea_merge, nes_cols[1], nes_cols[2], 
+                              sig_cols, sig_fills, sig_sizes) +
+    xlab(paste0("NES (", names(nes_cols)[1], ")")) + 
+    ylab(paste0("NES (", names(nes_cols)[2], ")")) +
+    xlim(-3,3) + ylim(-3,3)
+  
+  gg_grid <- plot_grid(gg_vennbar, gg_vennpnt, ncol=1, align='v', axis='lr', rel_heights=c(1,6))
+  return(list("gg"=gg_grid, "overlap"=split_sig, "gsea"=gsea_merge))
+})
+names(gg_gseas) <- names(gseas[[1]])
+
+# Do the vizzy-vizzies
+pdf(file=file.path("results", "gsea", "gsea_comp_scatter.pdf"), height = 12, width = 12)
+plot_grid(plotlist=lapply(gg_gseas[-6], function(i) i$gg), ncol=2)
+dev.off()
+
+# Save the intermediate files
+gsea_l <- list("gsea_by_inh"=gseas,
+               "gsea_by_geneset"=lapply(gg_gseas,function(i) i$gsea),
+               "sig_genesets"=lapply(gg_gseas,function(i) i$overlap))
+saveRDS(gsea_l, file=deseq_gsea_f)
+
+
+######################################################
+#### 5.b) Barplot of select significant gene-sets ####
+
+
+##############
+#### TEST ####
+
+
+
 
 
 dds_vst <- vst(sub_dds, blind=T)
@@ -129,20 +337,3 @@ order_idx_tdln <- with(meta_df_tdln, order(celltype, lnstatus, treatmen
 #########################################
 #### 4. Calculate differential genes ####
 # Calculate differential 
-overall_reslfc_ln <- lfcShrink(dds, coef=coef, type="apeglm")
-
-
-# Group-wise pairings between samples
-metal <- split(meta, meta$sampletype)
-pairs <- combn(names(metal), 2)
-ddsl <- apply(pairs, 2, function(i){
-  meta_i <- rbind(metal[[i[1]]], metal[[i[2]]])
-  dds_i <- DESeqDataSetFromMatrix(countData=cnt[,rownames(meta_i)],
-                                  colData=meta_i,
-                                  design=as.formula('~sampletype'))
-  return(dds_i)
-}) %>%
-  setNames(., apply(pairs, 2, paste, collapse="_"))
-
-
-
