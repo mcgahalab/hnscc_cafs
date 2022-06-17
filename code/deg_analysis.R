@@ -1,3 +1,5 @@
+# McGuigan RNAseq analysis of G9a/GLP inhibitor A366 and OICR on CAFs
+
 # DEG analysis
 library(DESeq2)
 library(pheatmap)
@@ -16,36 +18,35 @@ library(org.Hs.eg.db)
 library(clusterProfiler)
 library(enrichplot)
 library(msigdbr)
-# # TF Motifs
-# library(JASPAR2020)
-# library(TFBSTools)
-# library(motifmatchr)
-# library(ChIPseeker)
-# library(TxDb.Hsapiens.UCSC.hg38.knownGene)
-# library(BSgenome.Hsapiens.UCSC.hg38)
 # Custom
 source("~/git/mini_projects/mini_functions/iterateMsigdb.R")
-wideScreen()
+
+if(exists("wideScreen")) wideScreen()
+pdir <- '/cluster/projects/mcgahalab/data/mcgahalab/mcguigan_and_nila_ram/analysis'
+setwd(pdir)
+
 
 # Load in ChEA3 genesets
 cheadir <- '/cluster/projects/mcgahalab/ref/chea3'
 cheaf <- list.files(cheadir, pattern=".gmt$")
-chea <- lapply(file.path(cheadir, cheaf), function(pathtochea){
-  print(pathtochea)
-  read.table(pathtochea, sep="\t", header=F, stringsAsFactors = F, 
-             check.names = F, fill=T) %>%
-    mutate(V1=make.unique(V1)) %>%
-    column_to_rownames(., "V1") %>% 
-    apply(., 1, function(i) list(i[i!=''])) %>%
-    unlist(., recursive = F)
-}) %>%
-  setNames(., gsub(".gmt", "", cheaf))
-saveRDS(chea, file=file.path(cheadir, "chea.rds"))
-chea <- readRDS(file.path(cheadir, "chea.rds"))
-
-
-pdir <- '/cluster/projects/mcgahalab/data/mcgahalab/mcguigan_and_nila_ram/analysis'
-setwd(pdir)
+if(!file.exists(file.path(cheadir, "chea.rds"))){
+  chea <- lapply(file.path(cheadir, cheaf), function(pathtochea){
+    print(pathtochea)
+    cdf <- read.table(pathtochea, sep="\t", header=F, stringsAsFactors = F, 
+               check.names = F, fill=T) %>%
+      mutate(V1=make.unique(V1)) %>%
+      column_to_rownames(., "V1") %>% 
+      apply(., 1, function(i) list(i[i!=''])) %>%
+      unlist(., recursive = F)
+    
+    cdf[sapply(cdf, length) > 5]
+  }) %>%
+    setNames(., gsub(".gmt", "", cheaf))
+  
+  saveRDS(chea, file=file.path(cheadir, "chea.rds"))
+} else {
+  chea <- readRDS(file.path(cheadir, "chea.rds"))
+}
 
 # Directories
 rdsdir <- file.path("data", "deseq2_rds", "rds")
@@ -57,6 +58,7 @@ deseq_f <- file.path("results", "data", "deseq.rds")
 deseq_vst_f <- file.path("results", "data", "deseq_vst.rds")
 deseq_res_f <- file.path("results", "data", "deseq_res.rds")
 deseq_gsea_f <- file.path("results", "data", "deseq_gsea.rds")
+deseq_tfea_f <- file.path("results", "data", "deseq_tfea.rds")
 deg_q_thresh <- 0.05
 max_pc <- 5
 
@@ -69,6 +71,7 @@ grp_cols <- c('DMSO'='#2b8cbe', 'A366'='#a50f15', 'OICR'='#fb6a4a') #blue, red, 
 qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
 col_sets <- c('Set1', 'Set2', 'Set3')
 col_v = unlist(mapply(brewer.pal, qual_col_pals[col_sets,]$maxcolors, col_sets))
+overlap_key <- c('nonSig'='-', 'OICR_only'='*', 'A366_only'='**', 'Intersect'='')
 
 # gsea params:
 geneset_oi <- NULL
@@ -119,8 +122,11 @@ formatStackedOverlap <- function(split_sig){
 }
 
 plotStackedOverlap <- function(overlap_cnt){
-  ggplot(overlap_cnt, aes(x=Count, y=grp, fill=sig)) +
+  overlap_cnt <- overlap_cnt %>%
+    mutate("fraction"=round(Count/sum(Count),2))
+  ggplot(overlap_cnt, aes(x=Count, y=grp, fill=sig, label=fraction)) +
     geom_bar(stat='identity', position='stack', alpha=0.75) +
+    geom_text(size = 3, position = position_stack(vjust = 0.5)) +
     scale_fill_manual(values=sig_fills) +
     theme_classic() +
     theme(axis.title.y = element_blank(),
@@ -296,18 +302,24 @@ gseas <- lapply(lfcs, function(lfc_i){
 
 # Merge GSEA dataframes between inhibitors by geneset, count overlap, and plot
 gg_gseas <- lapply(names(gseas[[1]]), function(geneset){
+  print(geneset)
   # setup
   gsea_inh1 <- gseas$A366[[geneset]]
   gsea_inh2 <- gseas$OICR[[geneset]]
-  col_idx <- c(1,5,7,10,11)
+  col_idx <- c(1,5,6,7,10,11)
   
   # merge gsea dataframes
   gsea_merge <- full_join(as.data.frame(gsea_inh1)[,col_idx],
                           as.data.frame(gsea_inh2)[,col_idx],
                           by='ID', suffix=c('.A366', '.OICR')) %>%
     column_to_rownames(., "ID")
-  
   qcols <- grep("p.adjust", colnames(gsea_merge), value=T)
+  # for(q in qcols){
+  #   pcol <- gsub('p.adjust', 'pvalue', q)
+  #   gsea_merge[,q] <- p.adjust(gsea_merge[,pcol], method='fdr')
+  # }
+  
+  # Split into Intersect, A366_only, OICR_only
   gsea_tmp <- venn(gsea_merge, qcols, deg_q_thresh)
   gsea_merge <- gsea_tmp$res
   split_sig <- gsea_tmp$sig
@@ -348,7 +360,15 @@ saveRDS(gsea_l, file=deseq_gsea_f)
 if(!exists("gsea_l")) gsea_l <- readRDS(deseq_gsea_f)
 gsea_merge <- do.call(rbind, gsea_l$gsea_by_geneset[c(1:5)]) %>%
   as.data.frame 
-geneset_ois <- sapply(gsea_l$sig_genesets, function(geneset_i) geneset_i$Intersect)
+qcols <- grep("p.adjust", colnames(gsea_merge), value=T)
+for(q in qcols){
+  pcol <- gsub('p.adjust', 'pvalue', q)
+  gsea_merge[,q] <- p.adjust(gsea_merge[,pcol], method='fdr')
+}
+# Split into Intersect, A366_only, OICR_only
+gsea_tmp <- venn(gsea_merge, qcols, deg_q_thresh)
+gsea_merge <- gsea_tmp$res
+# geneset_ois <- sapply(gsea_l$sig_genesets, function(geneset_i) geneset_i$Intersect)
 
 # label the GSEA results by their geneset and msigdb level
 gsea_merge <- cbind(gsea_merge,
@@ -361,53 +381,67 @@ gsea_merge <- cbind(gsea_merge,
 # validation check
 if(is.null(geneset_oi)) warning(cat(paste0(
   "> No genesets specified, defaulting to top5 per geneset, 
-  please list from the following list: \n",
-  paste(paste0("\t- ", unlist(geneset_ois)), collapse="\n"))))
+  please list from the following list: \n")))
+gsea_merge <- gsea_merge %>% 
+  mutate(fishersp=apply(gsea_merge[,c('pvalue.A366', 'pvalue.OICR')], 1, function(i)
+    metap::sumlog(i)$p)) %>%
+  mutate(p.adjust.fishers=p.adjust(fishersp, method='fdr'))
 if(is.null(geneset_oi)) {
   geneset_oi <- gsea_merge %>% 
-    mutate(pcum=abs(1-(p.adjust.A366 + p.adjust.OICR))) %>%
-    filter((p.adjust.A366 < deg_q_thresh) | (p.adjust.OICR < deg_q_thresh)) %>%
-    group_by(C) %>%
-    top_n(., 5, pcum) %>% 
+    mutate(pcum=abs(1-(p.adjust.A366 + p.adjust.OICR)),
+           dir=((NES.A366 > 0) | (NES.OICR > 0))) %>%
+    # filter((p.adjust.A366 < deg_q_thresh) | (p.adjust.OICR < deg_q_thresh)) %>%
+    filter(p.adjust.fishers < deg_q_thresh) %>%
+    group_by(C, dir) %>%
+    top_n(., 5, p.adjust.fishers) %>% 
     select(geneset)
   geneset_oi <- geneset_oi$geneset
 }
-  
+
 nes_cols <- grep("NES", colnames(gsea_merge), value=T) %>%
   setNames(., gsub("^.*\\.", "", .)) 
-gsea_melt <- gsea_merge %>% 
+gsea_melt <- gsea_merge %>%
   filter(geneset %in% geneset_oi) %>%
   select(nes_cols, C, geneset, sig) %>%
   mutate(geneset = gsub("_", " ", geneset) %>%
            gsub("HALLMARK |GOBP |REACTOME |GOCC |GOMF ", "", .) %>%
-           str_to_sentence) %>%
+           stringr::str_to_sentence(.)) %>%
   melt %>% 
-  rename_with(., ~ c("msig", "Geneset", "Overlap", "Inhibitor", "NES")) 
+  rename_with(., ~ c("msig", "Geneset", "Overlap", "Inhibitor", "NES"))
+gsea_melt <- gsea_melt %>%
+  mutate(Geneset=factor(Geneset, 
+                        levels=unique(gsea_melt[order(gsea_melt$NES),'Geneset'])),
+         overlap=overlap_key[Overlap])
 
-gg_bar <- ggplot(gsea_melt, aes(y=Geneset, x=NES, color=Overlap, 
-                                fill=Inhibitor, group=Inhibitor)) +
-  geom_hline(aes(yintercept=Geneset), linetype='dashed', color='grey') + 
+gg_bar <- ggplot(gsea_melt, aes(y=Geneset, x=NES, #color=Overlap,
+                                fill=Inhibitor, group=Inhibitor,
+                                label = overlap)) +
+  geom_hline(aes(yintercept=Geneset), linetype='dashed', color='grey', size=0.25) + 
   geom_bar(stat='identity', position='dodge', size=0.7, width=0.8) +
   scale_fill_manual(values=c('A366'='grey1',
                              'OICR'='grey50')) +
-  scale_color_manual(values=c(sig_fills,
-                             'nonSig'='grey')) +
+  # scale_color_manual(values=c(sig_fills,
+  #                            'nonSig'='grey')) +
+  geom_text(x=2.8, hjust = 0, vjust=0.5) +
   facet_grid(msig ~ ., scales='free', space='free',switch = "y") +
   theme_classic() +
   xlim(-3,3) + ylim(-3,3) +
   geom_vline(xintercept=0, color='black') +
-  theme(axis.text.y = element_text(size=6, hjust=0),
+  theme(axis.text.y = element_text(size=6, hjust=1),
         strip.text.y.left = element_text(angle=90, size=8),
         legend.position = 'right',
         legend.margin =margin(0,0,0,0)) +
   guides(fill=guide_legend(title="q < 0.05")) +
   ylab("") + xlab("NES") +
-  scale_y_discrete(labels =  scales::wrap_format(40))
+  scale_y_discrete(labels =  scales::wrap_format(50))
 
-pdf(file=file.path("results", "gsea", "gsea_bar.pdf"), height = 6, width = 6)
+pdf(file=file.path("results", "gsea", "gsea_bar.pdf"), height = 7, width = 6)
 gg_bar
 dev.off()
-  
+write.table(gsea_merge, file.path("results", "gsea", "gsea_merge.tsv"),
+            sep="\t", col.names = T, row.names = F, quote = F)
+gsea_merge[grep("centriole", gsea_merge$geneset, ignore.case = T), ] 
+
 ########################################################
 #### 6. DEG Heatmap of significant genes & genesets ####
 if(!exists("resl")) resl <- readRDS(deseq_res_f)
@@ -485,6 +519,7 @@ meta <- vsd@colData %>%
 unique_genesets <- unique(geneset_split_genes$Geneset)
 unique_genesets <- unique_genesets[!is.na(unique_genesets)]
 genes_geneset <- split(geneset_split_genes, f=is.na(geneset_split_genes$Geneset))
+genes_geneset_overlap <- split(geneset_split_genes, f=geneset_split_genes$Overlap)
 ann_colors <- list("sampletype"=grp_cols,
                    "Overlap"=sig_fills,
                    "Geneset"=setNames(col_v[1:length(unique_genesets)], unique_genesets))
@@ -507,6 +542,14 @@ ComplexHeatmap::pheatmap(z_cnts[match(rownames(gene_meta_i), rownames(z_cnts)),
                annotation_row=gene_meta_i, annotation_colors=(ann_colors))
 dev.off()
 
+pdf(file.path("results", "deg", "deg_heatmap.intersect.pdf"), width = 4.5, height = 9)
+ComplexHeatmap::pheatmap(z_cnts[match(rownames(genes_geneset_overlap$Intersect), rownames(z_cnts)),
+                                match(rownames(meta), colnames(z_cnts))], 
+                         cluster_rows=TRUE, show_rownames=TRUE, cluster_cols=FALSE, 
+                         annotation_col=meta[,1,drop=F],
+                         annotation_colors=(ann_colors), fontsize_row=3)
+dev.off()
+
 ####################################################
 #### 7. Analyze enrichment of TF motifs in DEGs ####
 if(!exists("resl")) resl <- readRDS(deseq_res_f)
@@ -516,6 +559,15 @@ if(!exists("resl")) resl <- readRDS(deseq_res_f)
 lfc_col <- 'log2FoldChange'
 lfcs <- list("A366"=resl$res[,paste0(lfc_col, ".", "A366"), drop=F],
              "OICR"=resl$res[,paste0(lfc_col, ".", "OICR"), drop=F])
+
+# gseaFunction with an increased max GSSize
+gseaFun <- function(msig_ds, lfc_v){
+  gsea <- tryCatch({
+    GSEA(sort(na.omit(lfc_v), decreasing = T), 
+         TERM2GENE = msig_ds, pvalueCutoff = 1, maxGSSize=3000)
+  }, error=function(e){NULL})
+  return(gsea)
+}
 
 # Run GSEA on the TF databases from ChEA3
 tfeas <- lapply(lfcs, function(lfc_i){
@@ -547,82 +599,133 @@ tfeas <- readRDS(file=file.path("results", "deg", "tfea.rds"))
 tfeas <- lapply(tfeas, function(tfea){
   tfea %>% 
     group_by(database) %>%
-    mutate(p.adjust = p.adjust(pvalue))
+    mutate(p.adjust = p.adjust(pvalue, method='fdr'))
 })
 col_sel <- c('database', 'ID', 'NES', 'p.adjust')
 
+# Group together the two inhibitors and combine the p-values (and fdr adjust)
+tfea_merge <- purrr::reduce(tfeas, full_join, by=c('database', 'ID'), 
+                            suffix=paste0(".", names(tfeas))) %>%
+  filter(!is.na(pvalue.A366) & !is.na(pvalue.OICR))
+pcols <- grep("pvalue", colnames(tfea_merge), value=T)
+padj_col <- grep("p.adjust", colnames(tfea_merge), value=T)
+
+fishersp <- apply(tfea_merge, 1, function(i) metap::sumlog(as.numeric(i[pcols]))$p)
+tfea_merge <- tfea_merge %>%
+  as.data.frame %>%
+  mutate(fishersp=fishersp,
+         dir=((NES.A366 > 0) | (NES.OICR > 0))) %>%
+  mutate(p.adjust.fishers=p.adjust(fishersp, method='fdr'))
+rownames(tfea_merge) <- apply(tfea_merge[,c('database', 'ID')], 1, paste, collapse=".")
+
+# Annotate interesect, A366_only, OICR_only
+res_tmp <- venn(df = tfea_merge, pcols = padj_col, qthresh = deg_q_thresh)
+tfea_merge <- res_tmp$res
+
 # Extract the top significant TFs across both inhibitors
-top_sig_tfea <- lapply(tfeas, function(tfea) {
-  x <- tfea %>% 
-    filter(p.adjust < deg_q_thresh) %>%
-    mutate(IDsimple=gsub("_.*", "", ID))
-  
-  tblx <- table(x$IDsimple)
-  tail(sort(tblx[tblx>2]), 5) %>%
-    names
-}) %>% 
-  unlist %>% 
+regulon_oi <- tfea_merge %>% 
+  filter(p.adjust.fishers < deg_q_thresh) %>%
+  mutate(C=gsub("_.*", "", ID)) %>%
+  group_by(dir) %>%
+  slice_min(., p.adjust.fishers, n=5) %>%
+  select(ID)
+regulon_oi <- regulon_oi$ID %>% 
+  gsub("_.*", "", .) %>%
   unique
 
-
-# Merge the TFEA results and ensure proper labels
-tfea_merge <- full_join(tfeas$A366[,col_sel], tfeas$OICR[,col_sel], 
-                        by=c('database', 'ID'), suffix=c(".A366", ".OICR"))
-
 # Select and merge the top TFEA values, calculate SD around each
-top_tfea_l <- sapply(top_sig_tfea, grep, x=tfea_merge$ID, value=T)
+top_tfea_l <- sapply(regulon_oi, function(i) {
+  i <- i %>% 
+    gsub("_.*", "", .) %>%
+    gsub("$", "(_.*)?$", .) %>%
+    paste0("^", .)
+  grep(i, x=tfea_merge$ID, value=T, perl=T)
+})
 tfea_merge_summ <- lapply(top_tfea_l, function(tfea_id){
   tfea_merge[which(tfea_merge$ID %in% tfea_id),,drop=F] %>%
     group_by(database) %>%
     summarise(NES.A366.mean=mean(NES.A366),
-              # NES.A366.sd=sd(NES.A366),
               NES.OICR.mean=mean(NES.OICR),
-              # NES.OICR.sd=sd(NES.OICR),
-              q.A366.mean=mean(p.adjust.A366),
-              q.OICR.mean=mean(p.adjust.OICR))
+              dir=any(dir),
+              p.adjust.fishers=p.adjust.fishers,
+              sig=sig)
 }) %>%
   rbindlist(., idcol="TF") %>%
-  mutate(q.A366.mean = (q.A366.mean<deg_q_thresh),
-         q.OICR.mean = (q.OICR.mean<deg_q_thresh))
-tfea_merge_summ$qSig <- 'A366_only'
-tfea_merge_summ$qSig[with(tfea_merge_summ, which(q.OICR.mean & (!q.A366.mean)))] <- 'OICR_only'
-tfea_merge_summ$qSig[with(tfea_merge_summ, which(q.OICR.mean & q.A366.mean))] <- 'Intersect'
+  mutate(overlap=overlap_key[sig])
+
+topn_tfs <- tfea_merge_summ %>% 
+  group_by(TF) %>%
+  summarise(NES=abs(sum(NES.A366.mean, NES.OICR.mean)),
+            dir=any(dir)) %>%
+  group_by(dir) %>%
+  slice_max(., NES, n=5)
+tfea_merge_summ <- tfea_merge_summ %>%
+  filter(TF %in% topn_tfs$TF)
 
 # Melt and plot
 nes_cols <- grep("NES", colnames(tfea_merge_summ), value=T) %>%
   setNames(., gsub("^.*\\.", "", .)) 
 melt_tfea <- tfea_merge_summ %>% 
-  select(-q.A366.mean, -q.OICR.mean) %>%
+  select(-p.adjust.fishers) %>%
   melt %>% 
-  mutate(variable=gsub("^.*\\.(.*)\\..*", "\\1", variable)) %>%
-  rename_with(., ~c("TF", "Database", "Overlap", "Inhibitor", "NES"))
+  mutate(variable=gsub("^.*\\.(.*)\\..*", "\\1", variable), 
+         database=gsub("_Coexpression", "", database) %>%
+           gsub("_ChIP-seq", "", .)) %>%
+  rename_with(., ~c("TF", "Database", "Overlap", "overlap", "Inhibitor", "NES"))
 
 
-gg_bar <- ggplot(melt_tfea, aes(y=Database, x=NES, color=Overlap, 
+gg_bar <- ggplot(melt_tfea, aes(y=Database, x=NES, label = overlap, #color=Overlap,
                                 fill=Inhibitor, group=Inhibitor)) +
-  geom_hline(aes(yintercept=Database), linetype='dashed', color='grey') + 
+  geom_hline(aes(yintercept=Database), linetype='dashed', color='grey', size=0.25) + 
   geom_bar(stat='identity', position='dodge', size=0.7, width=0.8) +
+  geom_text(x=2.8, hjust = 0, vjust=0.5) +
   scale_fill_manual(values=c('A366'='grey1',
                              'OICR'='grey50')) +
-  scale_color_manual(values=c(sig_fills,
-                              'nonSig'='grey')) +
+  #scale_color_manual(values=c(sig_fills,
+  #                            'nonSig'='grey')) +
   facet_grid(TF ~ ., scales='free', space='free',switch = "y") +
   theme_classic() +
   xlim(-3,3) + ylim(-3,3) +
   geom_vline(xintercept=0, color='black') +
   theme(axis.text.y = element_text(size=6, hjust=0),
-        strip.text.y.left = element_text(angle=90, size=8),
+        strip.text.y.left = element_text(angle=0, size=8),
         legend.position = 'right',
         legend.margin =margin(0,0,0,0)) +
   guides(fill=guide_legend(title="q < 0.05")) +
   ylab("") + xlab("NES") +
   scale_y_discrete(labels =  scales::wrap_format(40))
 
-pdf(file=file.path("results", "tf", "tfea_bar.pdf"), height = 3, width = 6)
+pdf(file=file.path("results", "tf", "tfea_bar.pdf"), height = 7, width = 6)
 gg_bar
 dev.off()
 
+saveRDS(list("tfea"=tfeas, "tfea_merge"=tfea_merge), 
+        file=deseq_tfea_f)
 
+# tfea_merge[grep("SU", tfea_merge$ID, ignore.case = T),]
+
+############################################
+#### 8. Write out CSV for DEG/GSEA/TFEA ####
+if(!exists("resl")) resl <- readRDS(deseq_res_f)
+if(!exists("tfeal")) tfeal <- readRDS(deseq_tfea_f)
+if(!exists("gseal")) gseal <- readRDS(deseq_gsea_f)
+
+gsea_merge <- do.call(rbind, gseal$gsea_by_geneset[c(1:5)]) %>%
+  as.data.frame %>%
+  rownames_to_column(.,var="geneset")
+gsea_merge <- gsea_merge[,-grep("core_enrichment", colnames(gsea_merge))]
+
+tfea_merge <- tfeal$tfea_merge
+
+deg_merge <- resl$res
+
+dir.create(file.path("results", "tables"))
+.writeTbl <- function(x,f){
+  write.table(x, file=f, quote=F, sep=",", row.names = T, col.names = T)
+}
+.writeTbl(deg_merge, file.path("results", "tables", "deg.csv"))
+.writeTbl(gsea_merge, file.path("results", "tables", "gsea.csv"))
+.writeTbl(tfea_merge, file.path("results", "tables", "tfea.csv"))
 #### Old JASPAR2020 Code ####
 stop("DO NOT RUN")
 # Get JASPAR2020 motifs for homo sapiens
