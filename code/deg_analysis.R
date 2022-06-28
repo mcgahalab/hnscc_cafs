@@ -58,6 +58,7 @@ deseq_f <- file.path("results", "data", "deseq.rds")
 deseq_vst_f <- file.path("results", "data", "deseq_vst.rds")
 deseq_res_f <- file.path("results", "data", "deseq_res.rds")
 deseq_gsea_f <- file.path("results", "data", "deseq_gsea.rds")
+deseq_gsea_merge_f <- file.path("results", "data", "deseq_gsea_merge.rds")
 deseq_tfea_f <- file.path("results", "data", "deseq_tfea.rds")
 deg_q_thresh <- 0.05
 max_pc <- 5
@@ -438,9 +439,11 @@ gg_bar <- ggplot(gsea_melt, aes(y=Geneset, x=NES, #color=Overlap,
 pdf(file=file.path("results", "gsea", "gsea_bar.pdf"), height = 7, width = 6)
 gg_bar
 dev.off()
-write.table(gsea_merge, file.path("results", "gsea", "gsea_merge.tsv"),
-            sep="\t", col.names = T, row.names = F, quote = F)
-gsea_merge[grep("centriole", gsea_merge$geneset, ignore.case = T), ] 
+saveRDS(gsea_merge, file=deseq_gsea_merge_f)
+# 
+# write.table(gsea_merge, file.path("results", "gsea", "gsea_merge.tsv"),
+#             sep="\t", col.names = T, row.names = F, quote = F)
+# gsea_merge[grep("centriole", gsea_merge$geneset, ignore.case = T), ] 
 
 ########################################################
 #### 6. DEG Heatmap of significant genes & genesets ####
@@ -701,19 +704,13 @@ dev.off()
 
 saveRDS(list("tfea"=tfeas, "tfea_merge"=tfea_merge), 
         file=deseq_tfea_f)
-
 # tfea_merge[grep("SU", tfea_merge$ID, ignore.case = T),]
 
 ############################################
 #### 8. Write out CSV for DEG/GSEA/TFEA ####
 if(!exists("resl")) resl <- readRDS(deseq_res_f)
 if(!exists("tfeal")) tfeal <- readRDS(deseq_tfea_f)
-if(!exists("gseal")) gseal <- readRDS(deseq_gsea_f)
-
-gsea_merge <- do.call(rbind, gseal$gsea_by_geneset[c(1:5)]) %>%
-  as.data.frame %>%
-  rownames_to_column(.,var="geneset")
-gsea_merge <- gsea_merge[,-grep("core_enrichment", colnames(gsea_merge))]
+if(!exists("gsea_merge")) gsea_merge <- readRDS(deseq_gsea_merge_f)
 
 tfea_merge <- tfeal$tfea_merge
 
@@ -721,6 +718,12 @@ deg_merge <- resl$res
 
 dir.create(file.path("results", "tables"))
 .writeTbl <- function(x,f){
+  le_idx <- grep("leading_edge", colnames(x))
+  if(length(le_idx) > 0){
+    for(idx in le_idx){
+      x[,idx] <- gsub(",", "", x[,idx])
+    }
+  }
   write.table(x, file=f, quote=F, sep=",", row.names = T, col.names = T)
 }
 .writeTbl(deg_merge, file.path("results", "tables", "deg.csv"))
